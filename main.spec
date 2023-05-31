@@ -6,7 +6,7 @@ block_cipher = None
 
 a = Analysis(
     ['main.py', 'openshift_helper_client.py'],
-    pathex=['stats/lib/python3.11/site-packages'],
+    pathex=[],
     binaries=[],
     datas=[],
     hiddenimports=[],
