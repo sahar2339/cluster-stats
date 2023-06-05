@@ -37,6 +37,7 @@ func disableWarnings() {
 	os.Setenv("KUBERNETES_TRUST_CERT", "true")
 }
 
+// decide the size category to match the sizes on tableau
 func getInstanceSize(resources Resources) int {
 	switch resources {
 	case Resources{CPU: "1", Memory: "8Gi"}:
@@ -59,12 +60,15 @@ func getInstanceSize(resources Resources) int {
 }
 
 func writeToFile(instances map[string][]int, nodeInfo NodeInfo) {
+	// open the csv file
 	file, err := os.Create(csvPath)
 	if err != nil {
 		panic(err)
 	}
 	defer file.Close()
+	// write the headers
 	file.WriteString("Namespace / Size, small, medium, large, x-large, xx-large, xxx-large, xxxx-large, other\n")
+	// write the sizes if the cntainers in each namespace
 	for namespace, sizes := range instances {
 		namespaceLine := namespace + ","
 		for _, size := range sizes {
@@ -77,12 +81,14 @@ func writeToFile(instances map[string][]int, nodeInfo NodeInfo) {
 		file.WriteString(namespaceLine + "\n")
 	}
 	file.WriteString("\n")
-
+	// node info
 	file.WriteString("\n\n\n\n")
 	file.WriteString(fmt.Sprintf("Number of nodes %d, Average of CPU limits on nodes: %.2f%%, Average of memory limits on nodes: %.2f%%\n", nodeInfo.Number, nodeInfo.CPU, nodeInfo.Memory))
 	fmt.Printf("Finish writing to csv file! (%s)\n", csvPath)
 }
 
+
+// Extract the resources from the container spec
 func getContainerResources(container v1.Container) Resources {
 	resources := Resources{}
 	if container.Resources.Limits != nil {
@@ -107,6 +113,7 @@ func parseMemoryValue(memoryValue string) int64 {
 	return memoryQuantity.Value()
 }
 
+// calculateNodeAvgAllocation takes node list and kubernetes client and calculate the amount of nodes, avarage CPU and memory limits.
 func calculateNodeAvgAllocation(nodes *v1.NodeList, clientset *kubernetes.Clientset) NodeInfo {
 	var (
 		totalCPUUtilization    float64
@@ -115,15 +122,18 @@ func calculateNodeAvgAllocation(nodes *v1.NodeList, clientset *kubernetes.Client
 		totalNodeMemory        int64
 	)
 
+	// Iterate over each node in the cluster
 	for _, node := range nodes.Items {
 		allocatableResources := node.Status.Allocatable
 
 		cpuValue := allocatableResources["cpu"]
 		memoryValue := allocatableResources["memory"]
 
+		// Parse the CPU and memory values for the node
 		totalNodeCPU += parseCPUValue(cpuValue.String())
 		totalNodeMemory += parseMemoryValue(memoryValue.String())
 
+		// Get the list of pods scheduled on the current node
 		pods, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{
 			FieldSelector: "spec.nodeName=" + node.Name,
 		})
@@ -135,6 +145,7 @@ func calculateNodeAvgAllocation(nodes *v1.NodeList, clientset *kubernetes.Client
 		var totalMemoryLimits int64
 		totalMemoryLimits = 0
 
+		// Iterate over each pod on the node and calculate the total CPU and memory limits
 		for _, pod := range pods.Items {
 			for _, container := range pod.Spec.Containers {
 				resources := getContainerResources(container)
@@ -145,10 +156,12 @@ func calculateNodeAvgAllocation(nodes *v1.NodeList, clientset *kubernetes.Client
 			}
 		}
 
+		// Accumulate the total CPU and memory utilization across all nodes
 		totalCPUUtilization += float64(totalCPULimits)
 		totalMemoryUtilization += float64(totalMemoryLimits)
 	}
 
+	// Calculate the average CPU and memory utilization across all nodes
 	averageCPUUtilization := (totalCPUUtilization / float64(totalNodeCPU)) * 100
 	averageMemoryUtilization := (totalMemoryUtilization / float64(totalNodeMemory)) * 100
 	return NodeInfo{
@@ -168,14 +181,14 @@ func scanCluster() {
 	}
 	flag.Parse()
 
-	// use the current context in kubeconfig
+	// Use the current context in kubeconfig to create a Kubernetes clientset
 	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
-	// Create a Kubernetes clientset
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		panic(err)
 	}
 
+	// Retrieve the list of pods in the cluster
 	pods, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		fmt.Print("Make sure you are logged in to the cluster!")
@@ -184,13 +197,17 @@ func scanCluster() {
 
 	instances := make(map[string][]int)
 
+	// Iterate over each pod in the cluster
 	for _, pod := range pods.Items {
+		// Skip deleted pods and pods in the "openshift" namespace
 		if pod.DeletionTimestamp != nil || strings.Contains(pod.ObjectMeta.Namespace, "openshift") {
 			continue
 		}
+		// Iterate over each container in the pod and get its resource limits
 		for _, container := range pod.Spec.Containers {
 			resources := getContainerResources(container)
 			if resources.CPU != "" || resources.Memory != "" {
+				// Increment the appropriate instance size counter for the namespace
 				if _, ok := instances[pod.ObjectMeta.Namespace]; !ok {
 					instances[pod.ObjectMeta.Namespace] = make([]int, 8)
 				}
@@ -200,12 +217,16 @@ func scanCluster() {
 		}
 	}
 
+	// Retrieve the list of nodes in the cluster
 	nodes, err := clientset.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		panic(err)
 	}
 
+	// Calculate the average CPU and memory allocation across all nodes
 	nodeInfo := calculateNodeAvgAllocation(nodes, clientset)
+
+	// Write the instance size distribution and node information to a CSV file
 	writeToFile(instances, nodeInfo)
 }
 
